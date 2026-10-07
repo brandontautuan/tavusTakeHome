@@ -36,7 +36,8 @@ app.post('/api/tavus/conversations', async (req, res) => {
       body: JSON.stringify({
         ...(palId ? { pal_id: palId } : {}),
         ...(faceId ? { face_id: faceId } : {}),
-        conversation_name: topic ? 'Neighborly conversation' : 'Neighborly local conversation',
+        conversation_name: 'Neighborly conversation',
+        ...(topic ? { conversational_context: `Before the call, the visitor said they might like to talk about: ${topic}` } : {}),
       }),
     });
     const data = await tavusResponse.json().catch(() => ({}));

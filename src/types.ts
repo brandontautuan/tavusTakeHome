@@ -1,0 +1,9 @@
+export type Category = 'Interests' | 'Preferences' | 'People';
+export type Approval = 'pending' | 'approved' | 'discarded';
+export type Saving = 'idle' | 'saving' | 'saved' | 'failed';
+export type Memory = { id: string; text: string; category: Category; conversationId: string; approval: Approval; saving: Saving; createdAt: string; savedAt?: string };
+export type NextStep = { id: string; text: string; status: 'proposed' | 'accepted' | 'skipped' };
+export type DemoStore = { memories: Memory[]; nextStep?: NextStep; hasVisited: boolean; recap?: string };
+export type Screen = 'home' | 'setup' | 'call' | 'recap' | 'memories';
+export type Connection = 'connecting' | 'connected' | 'failed';
+export type TavusConversation = { conversationId: string; conversationUrl: string; status: string };
