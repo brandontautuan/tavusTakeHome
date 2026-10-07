@@ -1,9 +1,9 @@
 import { lazy, Suspense, useEffect, useRef, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Icon, type IconName } from './Icon';
-import { emptyStore, repository, sampleSuggestion, SAMPLE_CONVERSATION_ID } from './store';
+import { emptyStore, newParticipantTag, repository } from './store';
 import { tavusClient } from './tavusClient';
-import type { Category, DemoStore, Memory, NextStep, Screen, TavusConversation } from './types';
+import type { Category, DemoStore, Memory, NextStep, Screen, TavusConversation, TavusMemorySnapshot } from './types';
 import './styles.css';
 
 // The Daily SDK is most of the bundle; only the call screen needs it.
@@ -18,7 +18,7 @@ const TITLES: Record<Screen, string> = {
   memories: 'Remembered details · Neighborly',
 };
 const DEFAULT_STEP: NextStep = { id: 'family-garden', text: 'Call a family member and share a gardening story.', status: 'proposed' };
-const DEFAULT_RECAP = 'Margaret and June talked about the tomatoes growing in Margaret’s garden.';
+const DEFAULT_RECAP = 'This sample recap is only available for the original prototype flow.';
 
 const screenFromHash = (): Screen => {
   const name = window.location.hash.slice(1) as Screen;
@@ -34,8 +34,13 @@ function App() {
   const [liveError, setLiveError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [topic, setTopic] = useState('');
-  const [mic, setMic] = useState(true);
-  const [camera, setCamera] = useState(false);
+  const [name, setName] = useState(() => store.profile?.name || '');
+  const [rememberName, setRememberName] = useState(() => Boolean(store.profile?.name));
+  const [mic, setMic] = useState(() => store.callPreferences?.mic ?? true);
+  const [camera, setCamera] = useState(() => store.callPreferences?.camera ?? false);
+  const [tavusMemory, setTavusMemory] = useState<TavusMemorySnapshot | null>(null);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
+  const [memoryVersion, setMemoryVersion] = useState(0);
   const storageOk = useRef(true);
   const resetDialog = useRef<HTMLDialogElement>(null);
   const firstView = useRef(true);
@@ -63,6 +68,15 @@ function App() {
 
   useEffect(() => { storageOk.current = repository.save(store); }, [store]);
 
+  useEffect(() => {
+    const tag = store.profile?.participantTag;
+    if (!tag) return;
+    let active = true;
+    setTavusMemory(null); setMemoryError(null);
+    tavusClient.memory(tag).then(snapshot => { if (active) setTavusMemory(snapshot); }).catch(error => { if (active) setMemoryError(error instanceof Error ? error.message : 'Could not read remembered details.'); });
+    return () => { active = false; };
+  }, [store.profile?.participantTag, memoryVersion]);
+
   // Screens swap in place, so move focus and the page title the way a navigation would.
   useEffect(() => {
     document.title = TITLES[view];
@@ -88,7 +102,9 @@ function App() {
     setIsCreating(true);
     setLiveError(null);
     try {
-      setLiveConversation(await tavusClient.start(topic.trim()));
+      const profile = { participantTag: store.profile?.participantTag || newParticipantTag(), ...(rememberName && name.trim() ? { name: name.trim() } : {}) };
+      setStore(previous => ({ ...previous, profile, callPreferences: { mic, camera } }));
+      setLiveConversation(await tavusClient.start(topic.trim(), profile.participantTag, profile.name));
       go('call');
     } catch (error) {
       setLiveError(error instanceof Error ? error.message : 'The conversation could not be started. Please try again.');
@@ -97,15 +113,12 @@ function App() {
     }
   };
 
-  // The recap that follows a call is bundled sample material, not output from the live conversation.
-  const showSampleRecap = () => {
-    setStore(previous => ({
-      ...previous,
-      hasVisited: true,
-      memories: previous.memories.some(m => m.conversationId === SAMPLE_CONVERSATION_ID) ? previous.memories : [...previous.memories, sampleSuggestion()],
-    }));
+  const finishLiveCall = () => {
+    setStore(previous => ({ ...previous, hasVisited: true }));
     setLiveConversation(null);
-    go('recap', true);
+    setTopic('');
+    setMemoryVersion(version => version + 1);
+    go('home', true);
   };
 
   const reset = () => {
@@ -134,15 +147,15 @@ function App() {
         )}
       </header>
       <main id="content">
-        {view === 'home' && <Home store={store} saved={saved} onStart={() => go('setup')} onMemories={() => go('memories')} />}
-        {view === 'setup' && <Setup topic={topic} setTopic={setTopic} mic={mic} setMic={setMic} camera={camera} setCamera={setCamera} onStart={begin} isCreating={isCreating} error={liveError} onBack={() => go('home')} />}
+        {view === 'home' && <Home store={store} saved={saved} tavusMemory={tavusMemory} memoryError={memoryError} isCreating={isCreating} onRefreshMemory={() => setMemoryVersion(version => version + 1)} onStart={() => store.profile ? begin() : go('setup')} onSettings={() => go('setup')} onMemories={() => go('memories')} />}
+        {view === 'setup' && <Setup name={name} setName={setName} rememberName={rememberName} setRememberName={setRememberName} topic={topic} setTopic={setTopic} mic={mic} setMic={setMic} camera={camera} setCamera={setCamera} onStart={begin} isCreating={isCreating} error={liveError} onBack={() => go('home')} />}
         {view === 'call' && liveConversation && (
           <Suspense fallback={<section className="call wrap"><h1 className="visually-hidden">Your conversation</h1><p role="status">Joining your conversation…</p></section>}>
-            <LiveCall conversation={liveConversation} requestedMic={mic} requestedCamera={camera} onEnded={showSampleRecap} onAbandon={() => go('home', true)} />
+            <LiveCall conversation={liveConversation} requestedMic={mic} requestedCamera={camera} onEnded={finishLiveCall} onAbandon={() => go('home', true)} />
           </Suspense>
         )}
         {view === 'recap' && <Recap store={store} onApprove={approve} onUpdate={updateMemory} onPatch={patchStore} onHome={() => go('home')} />}
-        {view === 'memories' && <Memories saved={saved} onUpdate={updateMemory} onBack={() => go('home')} />}
+        {view === 'memories' && <Memories saved={saved} name={store.profile?.name} onUpdate={updateMemory} onBack={() => go('home')} />}
       </main>
       {!inCall && (
         <footer>
@@ -162,21 +175,25 @@ function App() {
   );
 }
 
-function Home({ store, saved, onStart, onMemories }: { store: DemoStore; saved: Memory[]; onStart: () => void; onMemories: () => void }) {
+function Home({ store, saved, tavusMemory, memoryError, isCreating, onRefreshMemory, onStart, onSettings, onMemories }: { store: DemoStore; saved: Memory[]; tavusMemory: TavusMemorySnapshot | null; memoryError: string | null; isCreating: boolean; onRefreshMemory: () => void; onStart: () => void; onSettings: () => void; onMemories: () => void }) {
   const step = store.nextStep;
+  const learnedFacts = tavusMemory?.facts || [];
   return (
     <section className="home wrap">
       <p className="eyebrow">A familiar face, whenever you feel like talking</p>
-      <h1>{store.hasVisited ? 'Welcome back, Margaret.' : 'Hello, Margaret.'}</h1>
+      <h1>{store.hasVisited ? `Welcome back${store.profile?.name ? `, ${store.profile.name}` : ''}.` : `Hello${store.profile?.name ? `, ${store.profile.name}` : ''}.`}</h1>
       <p className="lead">A friendly place to talk about your day, swap stories, or simply have a little company.</p>
-      <button className="primary big" onClick={onStart}>Start a conversation <Icon name="arrowRight" /></button>
+      <button className="primary big" onClick={onStart} disabled={isCreating}>{isCreating ? 'Starting your conversation…' : <>Start a conversation <Icon name="arrowRight" /></>}</button>
+      {store.profile && <button className="text-btn call-settings" onClick={onSettings}>Change how you join</button>}
       <p className="disclosure">Neighborly is an AI companion, not a person or a therapist.</p>
       <div className="home-grid">
         {store.hasVisited ? (
           <article>
-            <p className="label">Last time · sample</p>
-            <h2>A lovely chat about your garden</h2>
-            <p>You shared that you have been enjoying your tomato plants this year.</p>
+            <p className="label">LAST CONVERSATION</p>
+            <h2>{tavusMemory?.state === 'ready' ? 'A conversation to continue' : 'Getting ready for next time'}</h2>
+            <p>{tavusMemory === null ? 'Checking what your companion learned from the last conversation…' : tavusMemory.lastSummary || (tavusMemory.state === 'processing' ? 'Your companion is processing the last conversation. This can take a moment after a call ends.' : 'Your companion will use the details you choose to share to make the next conversation feel familiar.')}</p>
+            {memoryError && <p className="memory-error" role="status">{memoryError}</p>}
+            <button className="text-btn refresh-memory" onClick={onRefreshMemory}>Refresh remembered details</button>
             {step?.status === 'accepted' && (
               <div className="next"><Icon name="check" /><p><b>Your next step</b><br />{step.text}</p></div>
             )}
@@ -190,8 +207,8 @@ function Home({ store, saved, onStart, onMemories }: { store: DemoStore; saved: 
         )}
         <article className="remember">
           <p className="label">Remembered details</p>
-          <h2>{saved.length ? `${saved.length} detail${saved.length > 1 ? 's' : ''} you chose to save` : 'Nothing saved yet'}</h2>
-          <p>{saved.length ? saved.map(m => m.text).join(' ') : 'The details you share are always yours to decide.'}</p>
+          <h2>{learnedFacts.length ? `${learnedFacts.length} detail${learnedFacts.length > 1 ? 's' : ''} remembered` : saved.length ? `${saved.length} detail${saved.length > 1 ? 's' : ''} you chose to save` : 'Nothing saved yet'}</h2>
+          <p>{learnedFacts.length ? learnedFacts.join(' · ') : saved.length ? saved.map(m => m.text).join(' ') : 'The details you share are always yours to decide.'}</p>
           <button className="text-btn" onClick={onMemories}>View remembered details <Icon name="arrowRight" size={16} /></button>
         </article>
       </div>
@@ -200,6 +217,8 @@ function Home({ store, saved, onStart, onMemories }: { store: DemoStore; saved: 
 }
 
 type SetupProps = {
+  name: string; setName: (value: string) => void;
+  rememberName: boolean; setRememberName: (value: boolean) => void;
   topic: string; setTopic: (value: string) => void;
   mic: boolean; setMic: (on: boolean) => void;
   camera: boolean; setCamera: (on: boolean) => void;
@@ -207,13 +226,16 @@ type SetupProps = {
   isCreating: boolean; error: string | null;
 };
 
-function Setup({ topic, setTopic, mic, setMic, camera, setCamera, onStart, onBack, isCreating, error }: SetupProps) {
+function Setup({ name, setName, rememberName, setRememberName, topic, setTopic, mic, setMic, camera, setCamera, onStart, onBack, isCreating, error }: SetupProps) {
   return (
     <section className="wrap setup">
       <button className="text-btn back" onClick={onBack}><Icon name="arrowLeft" size={16} /> Back</button>
       <p className="eyebrow">Before we begin</p>
       <h1>Get comfortable</h1>
       <p className="lead">Choose how you would like to join. Your browser will ask before it uses your microphone or camera.</p>
+      <label className="profile-name">What should your companion call you? <span>Optional</span><input value={name} onChange={e => setName(e.target.value)} maxLength={80} autoComplete="given-name" placeholder="Your first name" /></label>
+      <label className="remember-choice"><input type="checkbox" checked={rememberName} onChange={e => setRememberName(e.target.checked)} disabled={!name.trim()} /> Remember this name for a future visit</label>
+      <p className="hint">This is optional. When selected, your name stays in this browser and is shared with the companion for future conversations.</p>
       <div className="device-row">
         <Device icon={mic ? 'mic' : 'micOff'} title="Microphone" on={mic} set={setMic} />
         <Device icon={camera ? 'camera' : 'cameraOff'} title="Camera" on={camera} set={setCamera} />
@@ -225,7 +247,7 @@ function Setup({ topic, setTopic, mic, setMic, camera, setCamera, onStart, onBac
       <p className="hint" id="topic-hint">Your companion will see this so the conversation can start there.</p>
       <aside className="notice">
         <Icon name="spark" size={22} />
-        <p><b>You are in control of what is remembered.</b><br />Nothing from the live call is saved. Afterwards you will see a sample recap with fictional details, to show how reviewing works.</p>
+        <p><b>Your companion can remember your conversations.</b><br />This local demo uses one browser-specific visitor ID so Tavus can build continuity with this companion over time.</p>
       </aside>
       {error && <p className="call-error" role="alert">{error}</p>}
       <button className="primary big" onClick={onStart} disabled={isCreating}>
@@ -359,7 +381,7 @@ function Recap({ store, onApprove, onUpdate, onPatch, onHome }: RecapProps) {
 
 const GROUPS: Category[] = ['Interests', 'Preferences', 'People'];
 
-function Memories({ saved, onUpdate, onBack }: { saved: Memory[]; onUpdate: MemoryPatch; onBack: () => void }) {
+function Memories({ saved, name, onUpdate, onBack }: { saved: Memory[]; name?: string; onUpdate: MemoryPatch; onBack: () => void }) {
   const [forgotten, setForgotten] = useState<Memory | null>(null);
   const forget = (m: Memory) => { onUpdate(m.id, { approval: 'discarded' }); setForgotten(m); };
   const undo = () => { if (forgotten) onUpdate(forgotten.id, { approval: 'approved' }); setForgotten(null); };
@@ -369,6 +391,7 @@ function Memories({ saved, onUpdate, onBack }: { saved: Memory[]; onUpdate: Memo
       <p className="eyebrow">Your choices, remembered</p>
       <h1>Remembered details</h1>
       <p className="lead">These details help make future conversations feel more personal. You can change or forget them at any time.</p>
+      {name && <section className="detail-group profile-detail"><h2>Your name</h2><p>{name}</p><small>Used to greet you in future local-demo conversations.</small></section>}
       <div role="status">
         {forgotten && <p className="undo">Forgotten: “{forgotten.text}” <button className="text-btn" onClick={undo}>Undo</button></p>}
       </div>
@@ -383,7 +406,7 @@ function Memories({ saved, onUpdate, onBack }: { saved: Memory[]; onUpdate: Memo
       })}
       <aside className="notice">
         <Icon name="spark" size={22} />
-        <p><b>Your privacy matters.</b><br />This demo keeps fictional data only in this browser. It does not make clinical assessments or diagnoses.</p>
+        <p><b>Your privacy matters.</b><br />Your chosen name and browser-specific participant ID stay in this browser. Tavus learns conversational continuity for that ID. This app does not make clinical assessments or diagnoses.</p>
       </aside>
     </section>
   );

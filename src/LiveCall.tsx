@@ -13,6 +13,7 @@ type Props = {
 };
 
 const playable = (track?: DailyTrackState) => (track?.state === 'playable' && track.persistentTrack) || null;
+const leavingIntent = /\b(?:goodbye|bye\b|see you|talk to you later|i(?:'m| am) (?:going|heading|off)|i(?:'ve| have) got to go|i need to go|i gotta go|leave (?:the )?call|end (?:the )?call)\b/i;
 
 // Re-attaches only when the underlying track changes, not on every participant update.
 function useTrack(ref: RefObject<HTMLMediaElement | null>, track: MediaStreamTrack | null) {
@@ -28,6 +29,9 @@ export default function LiveCall({ conversation, requestedMic, requestedCamera, 
   const selfVideoRef = useRef<HTMLVideoElement>(null);
   const leavingRef = useRef(false);
   const closedRef = useRef(false);
+  const onEndedRef = useRef(onEnded);
+  const endRef = useRef<() => void>(() => undefined);
+  const leavingIntentHandledRef = useRef(false);
   const [connection, setConnection] = useState<Connection>('connecting');
   const [micOn, setMicOn] = useState(requestedMic);
   const [cameraOn, setCameraOn] = useState(requestedCamera);
@@ -38,6 +42,9 @@ export default function LiveCall({ conversation, requestedMic, requestedCamera, 
   const [error, setError] = useState<string | null>(null);
   const [ending, setEnding] = useState(false);
   const [leftRoom, setLeftRoom] = useState(false);
+  const [automaticEnding, setAutomaticEnding] = useState(false);
+
+  useEffect(() => { onEndedRef.current = onEnded; }, [onEnded]);
 
   useEffect(() => {
     const call = DailyIframe.createCallObject();
@@ -51,11 +58,37 @@ export default function LiveCall({ conversation, requestedMic, requestedCamera, 
       setSelfVideo(playable(participants.local?.tracks.video));
     };
     const joined = () => { setConnection('connected'); refresh(); };
-    const left = () => { if (!leavingRef.current) setConnection('failed'); };
+    const left = () => {
+      if (leavingRef.current) return;
+      // A PAL can invoke Tavus's built-in end_call tool after a natural goodbye.
+      // Daily then emits left-meeting; return home rather than showing a false failure.
+      closedRef.current = true;
+      setLeftRoom(true);
+      tavusClient.end(conversation.conversationId).catch(() => undefined).finally(() => onEndedRef.current());
+    };
     const failed = () => {
       if (leavingRef.current) return;
       setConnection('failed');
       setError('The call disconnected. Choose End call to close it, then start again whenever you like.');
+    };
+    const handleLeavingIntent = (text: unknown) => {
+      if (typeof text !== 'string' || !leavingIntent.test(text) || leavingIntentHandledRef.current || leavingRef.current) return;
+      leavingIntentHandledRef.current = true;
+      setAutomaticEnding(true);
+      // Give the PAL a moment to finish its farewell, then close the actual Tavus session.
+      window.setTimeout(() => endRef.current(), 1400);
+    };
+    const receivedAppMessage = (event: any) => {
+      const data = event?.data;
+      if (!data || !['conversation.utterance', 'conversation.utterance.streaming'].includes(data.event_type)) return;
+      const role = data.properties?.role || data.role;
+      if (role && role !== 'user') return;
+      handleLeavingIntent(data.properties?.text || data.properties?.transcript || data.properties?.content || data.text);
+    };
+    const receivedTranscription = (event: any) => {
+      const local = call.participants().local;
+      if (local?.session_id && event?.participantId !== local.session_id) return;
+      handleLeavingIntent(event?.text);
     };
     // Any exit that skips End call (tab close, Back, navigation) still closes the Tavus session.
     const closeOnExit = () => {
@@ -69,6 +102,8 @@ export default function LiveCall({ conversation, requestedMic, requestedCamera, 
     call.on('participant-left', refresh);
     call.on('left-meeting', left);
     call.on('error', failed);
+    call.on('app-message', receivedAppMessage);
+    call.on('transcription-message', receivedTranscription);
     window.addEventListener('pagehide', closeOnExit);
     call.join({ url: conversation.conversationUrl, startAudioOff: !requestedMic, startVideoOff: !requestedCamera }).catch(failed);
     return () => {
@@ -78,6 +113,8 @@ export default function LiveCall({ conversation, requestedMic, requestedCamera, 
       call.off('participant-left', refresh);
       call.off('left-meeting', left);
       call.off('error', failed);
+      call.off('app-message', receivedAppMessage);
+      call.off('transcription-message', receivedTranscription);
       window.removeEventListener('pagehide', closeOnExit);
       closeOnExit();
       call.leave().catch(() => undefined).finally(() => call.destroy());
@@ -107,6 +144,7 @@ export default function LiveCall({ conversation, requestedMic, requestedCamera, 
       setEnding(false);
     }
   };
+  endRef.current = end;
 
   const live = connection === 'connected' && !leftRoom;
   const status = leftRoom ? 'You have left the call' : connection === 'connected' ? 'Connected' : connection === 'connecting' ? 'Joining your conversation…' : 'Disconnected';
@@ -134,6 +172,7 @@ export default function LiveCall({ conversation, requestedMic, requestedCamera, 
         {selfVideo && !leftRoom && <video className="self-view" ref={selfVideoRef} autoPlay playsInline muted aria-label="Your camera, as your companion sees it" />}
       </div>
       {error && <p className="call-error" role="alert">{error}</p>}
+      {automaticEnding && !leftRoom && <p className="ending-note" role="status">Ending your call after a brief goodbye…</p>}
       <div className="call-controls">
         <button role="switch" aria-checked={micOn} onClick={toggleMicrophone} disabled={!live}>
           <Icon name={micOn ? 'mic' : 'micOff'} size={24} /><b>Microphone</b><span aria-hidden="true">{micOn ? 'On' : 'Off'}</span>
